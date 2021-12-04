@@ -3,6 +3,7 @@
 #include "EspmGameObject.h"
 #include "FormCallbacks.h"
 #include "GetBaseActorValues.h"
+#include "ServerState.cpp"
 #include "WorldState.h"
 #include <NiPoint3.h>
 
@@ -15,6 +16,9 @@ struct MpActor::Impl : public ChangeFormGuard<MpChangeForm>
 
   std::map<uint32_t, Viet::Promise<VarValue>> snippetPromises;
   uint32_t snippetIndex = 0;
+  bool isRespawning = false;
+  std::chrono::steady_clock::time_point lastAttributesUpdateTimePoint,
+    lastHitTimePoint;
 };
 
 MpActor::MpActor(const LocationalData& locationalData_,
@@ -118,6 +122,8 @@ MpChangeForm MpActor::GetChangeForm() const
   res.healthPercentage = achr.healthPercentage;
   res.magickaPercentage = achr.magickaPercentage;
   res.staminaPercentage = achr.staminaPercentage;
+  res.isDead = achr.isDead;
+  res.spawnPoint = achr.spawnPoint;
   // achr.dynamicFields isn't really used so I decided to comment this line:
   // res.dynamicFields.merge_patch(achr.dynamicFields);
 
@@ -164,8 +170,16 @@ void MpActor::ResolveSnippet(uint32_t snippetIdx, VarValue v)
 }
 
 void MpActor::SetPercentages(float healthPercentage, float magickaPercentage,
-                             float staminaPercentage)
+                             float staminaPercentage, MpActor* aggressor)
 {
+  if (IsDead() || pImpl->isRespawning) {
+    return;
+  }
+  if (healthPercentage == 0.f) {
+    Kill(aggressor);
+    RespawnAfter(kRespawnTimeSeconds, GetSpawnPoint());
+    return;
+  }
   pImpl->EditChangeForm([&](MpChangeForm& changeForm) {
     changeForm.healthPercentage = healthPercentage;
     changeForm.magickaPercentage = magickaPercentage;
@@ -176,26 +190,46 @@ void MpActor::SetPercentages(float healthPercentage, float magickaPercentage,
 std::chrono::steady_clock::time_point
 MpActor::GetLastAttributesPercentagesUpdate()
 {
-  return lastAttributesUpdateTimePoint;
+  return pImpl->lastAttributesUpdateTimePoint;
+}
+
+std::chrono::steady_clock::time_point MpActor::GetLastHitTime()
+{
+  return pImpl->lastHitTimePoint;
 }
 
 void MpActor::SetLastAttributesPercentagesUpdate(
   std::chrono::steady_clock::time_point timePoint)
 {
-  lastAttributesUpdateTimePoint = timePoint;
+  pImpl->lastAttributesUpdateTimePoint = timePoint;
+}
+
+void MpActor::SetLastHitTime(std::chrono::steady_clock::time_point timePoint)
+{
+  pImpl->lastHitTimePoint = timePoint;
 }
 
 std::chrono::duration<float> MpActor::GetDurationOfAttributesPercentagesUpdate(
   std::chrono::steady_clock::time_point now)
 {
   std::chrono::duration<float> timeAfterRegeneration =
-    now - lastAttributesUpdateTimePoint;
+    now - pImpl->lastAttributesUpdateTimePoint;
   return timeAfterRegeneration;
 }
 
 const bool& MpActor::IsRaceMenuOpen() const
 {
   return pImpl->ChangeForm().isRaceMenuOpen;
+}
+
+const bool& MpActor::IsDead() const
+{
+  return pImpl->ChangeForm().isDead;
+}
+
+const bool& MpActor::IsRespawning() const
+{
+  return pImpl->isRespawning;
 }
 
 std::unique_ptr<const Appearance> MpActor::GetAppearance() const
@@ -217,14 +251,116 @@ const std::string& MpActor::GetAppearanceAsJson()
   return pImpl->ChangeForm().appearanceDump;
 }
 
-const std::string& MpActor::GetEquipmentAsJson()
+const std::string& MpActor::GetEquipmentAsJson() const
 {
   return pImpl->ChangeForm().equipmentDump;
-};
+}
+
+Equipment MpActor::GetEquipment() const
+{
+  std::string equipment = GetEquipmentAsJson();
+  simdjson::dom::parser p;
+  auto parseResult = p.parse(equipment);
+  return Equipment::FromJson(parseResult.value());
+}
+
+uint32_t MpActor::GetRaceId() const
+{
+  auto appearance = GetAppearance();
+  if (appearance) {
+    return appearance->raceId;
+  }
+  WorldState* espmProvider = GetParent();
+  uint32_t baseId = GetBaseId();
+  return espm::GetData<espm::NPC_>(baseId, espmProvider).race;
+}
 
 bool MpActor::IsWeaponDrawn() const
 {
   return GetAnimationVariableBool("_skymp_isWeapDrawn");
+}
+
+espm::ObjectBounds MpActor::GetBounds() const
+{
+  return espm::GetData<espm::NPC_>(GetBaseId(), GetParent()).objectBounds;
+}
+
+void MpActor::SendAndSetDeathState(bool isDead)
+{
+  SendAndSetDeathState({}, isDead, false);
+}
+
+void MpActor::SendAndSetDeathState(const LocationalData& position, bool isDead,
+                                   bool shouldTeleport)
+{
+  float attribute = isDead ? 0.f : 1.f;
+
+  std::string respawnMsg = GetDeathStateMsg(position, isDead, shouldTeleport);
+  SendToUser(respawnMsg.data(), respawnMsg.size(), true);
+
+  pImpl->EditChangeForm([&](MpChangeForm& changeForm) {
+    changeForm.isDead = isDead;
+    changeForm.healthPercentage = attribute;
+    changeForm.magickaPercentage = attribute;
+    changeForm.staminaPercentage = attribute;
+  });
+  if (shouldTeleport) {
+    SetCellOrWorldObsolete(position.cellOrWorldDesc);
+    SetPos(position.pos);
+    SetAngle(position.rot);
+  }
+}
+
+std::string MpActor::GetDeathStateMsg(const LocationalData& position,
+                                      bool isDead, bool shouldTeleport)
+{
+  nlohmann::json tTeleport = nlohmann::json{};
+  nlohmann::json tChangeValues = nlohmann::json{};
+  nlohmann::json tIsDead = PreparePropertyMessage(this, "isDead", isDead);
+
+  if (shouldTeleport) {
+    tTeleport = nlohmann::json{
+      { "pos", { position.pos[0], position.pos[1], position.pos[2] } },
+      { "rot", { position.rot[0], position.rot[1], position.rot[2] } },
+      { "worldOrCell",
+        position.cellOrWorldDesc.ToFormId(GetParent()->espmFiles) },
+      { "type", "teleport" }
+    };
+  }
+  if (isDead == false) {
+    const float attribute = 1.f;
+    tChangeValues = nlohmann::json{ { "t", MsgType::ChangeValues },
+                                    { "data",
+                                      { { "health", attribute },
+                                        { "magicka", attribute },
+                                        { "stamina", attribute } } } };
+  }
+
+  std::string DeathStateMsg;
+  DeathStateMsg += Networking::MinPacketId;
+  DeathStateMsg += nlohmann::json{
+    { "t", MsgType::DeathStateContainer },
+    { "tTeleport", tTeleport },
+    { "tChangeValues", tChangeValues },
+    { "tIsDead", tIsDead }
+  }.dump();
+  return DeathStateMsg;
+}
+
+void MpActor::MpApiDeath(MpActor* killer)
+{
+  simdjson::dom::parser parser;
+
+  std::string s =
+    "[" + std::to_string(killer ? killer->GetFormId() : 0) + " ]";
+  auto args = parser.parse(s).value();
+
+  if (auto wst = GetParent()) {
+    const auto id = GetFormId();
+    for (auto& listener : wst->listeners) {
+      listener->OnMpApiEvent("onDeath", args, id);
+    }
+  }
 }
 
 void MpActor::BeforeDestroy()
@@ -244,4 +380,60 @@ void MpActor::Init(WorldState* worldState, uint32_t formId, bool hasChangeForm)
   if (worldState->HasEspm()) {
     EnsureBaseContainerAdded(GetParent()->GetEspm());
   }
+}
+
+void MpActor::Kill(MpActor* killer)
+{
+  SendAndSetDeathState(true);
+  MpApiDeath(killer);
+}
+
+void MpActor::RespawnAfter(float seconds, const LocationalData& position)
+{
+  pImpl->isRespawning = true;
+
+  uint32_t formId = GetFormId();
+  if (auto worldState = GetParent()) {
+    worldState->SetTimer(seconds).Then(
+      [worldState, this, formId, position](Viet::Void) {
+        if (worldState->LookupFormById(formId).get() == this) {
+          this->Respawn(position);
+        }
+      });
+  }
+}
+
+void MpActor::Respawn(const LocationalData& position)
+{
+  pImpl->isRespawning = false;
+  SendAndSetDeathState(position, false);
+}
+
+void MpActor::Teleport(const LocationalData& position)
+{
+  std::string teleportMsg;
+  teleportMsg += Networking::MinPacketId;
+  teleportMsg += nlohmann::json{
+    { "pos", { position.pos[0], position.pos[1], position.pos[2] } },
+    { "rot", { position.rot[0], position.rot[1], position.rot[2] } },
+    { "worldOrCell",
+      position.cellOrWorldDesc.ToFormId(GetParent()->espmFiles) },
+    { "type", "teleport" }
+  }.dump();
+  SendToUser(teleportMsg.data(), teleportMsg.size(), true);
+
+  SetCellOrWorldObsolete(position.cellOrWorldDesc);
+  SetPos(position.pos);
+  SetAngle(position.rot);
+}
+
+void MpActor::SetSpawnPoint(const LocationalData& position)
+{
+  pImpl->EditChangeForm(
+    [&](MpChangeForm& changeForm) { changeForm.spawnPoint = position; });
+}
+
+LocationalData MpActor::GetSpawnPoint() const
+{
+  return pImpl->ChangeForm().spawnPoint;
 }

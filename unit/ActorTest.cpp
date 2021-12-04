@@ -18,8 +18,8 @@ TEST_CASE(
   REQUIRE(actor.GetChangeForm().isRaceMenuOpen == true);
 }
 
-TEST_CASE("Actor should load be able to load appearance, equipment and "
-          "isRaceMenuOpen properties from changeform",
+TEST_CASE("Actor should load be able to load appearance, equipment, "
+          "isRaceMenuOpen and other properties from changeform",
           "[Actor]")
 {
   MpChangeForm changeForm;
@@ -30,6 +30,11 @@ TEST_CASE("Actor should load be able to load appearance, equipment and "
   changeForm.healthPercentage = 1.0f;
   changeForm.magickaPercentage = 0.9f;
   changeForm.staminaPercentage = 0.0f;
+  changeForm.isDead = true;
+  changeForm.spawnPoint.cellOrWorldDesc.file = "yay";
+  changeForm.spawnPoint.cellOrWorldDesc.shortFormId = 0xDEAD;
+  changeForm.spawnPoint.pos = { 1, 2, 3 };
+  changeForm.spawnPoint.rot = { 1, 2, 4 };
 
   MpActor actor(LocationalData(), FormCallbacks::DoNothing(), 0xff000000);
   actor.ApplyChangeForm(changeForm);
@@ -40,4 +45,10 @@ TEST_CASE("Actor should load be able to load appearance, equipment and "
   REQUIRE(actor.GetChangeForm().healthPercentage == 1.0f);
   REQUIRE(actor.GetChangeForm().magickaPercentage == 0.9f);
   REQUIRE(actor.GetChangeForm().staminaPercentage == 0.0f);
+  REQUIRE(actor.GetChangeForm().isDead == true);
+  REQUIRE(actor.GetChangeForm().spawnPoint.cellOrWorldDesc.file == "yay");
+  REQUIRE(actor.GetChangeForm().spawnPoint.cellOrWorldDesc.shortFormId ==
+          0xDEAD);
+  REQUIRE(actor.GetChangeForm().spawnPoint.pos == NiPoint3{ 1, 2, 3 });
+  REQUIRE(actor.GetChangeForm().spawnPoint.rot == NiPoint3{ 1, 2, 4 });
 }

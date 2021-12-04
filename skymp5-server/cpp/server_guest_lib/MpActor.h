@@ -8,6 +8,8 @@
 
 class WorldState;
 
+constexpr float kRespawnTimeSeconds = 5.f;
+
 class MpActor : public MpObjectReference
 {
 public:
@@ -18,10 +20,15 @@ public:
           const FormCallbacks& calbacks_, uint32_t optBaseId = 0);
 
   const bool& IsRaceMenuOpen() const;
+  const bool& IsDead() const;
+  const bool& IsRespawning() const;
   std::unique_ptr<const Appearance> GetAppearance() const;
   const std::string& GetAppearanceAsJson();
-  const std::string& GetEquipmentAsJson();
+  const std::string& GetEquipmentAsJson() const;
+  Equipment GetEquipment() const;
+  uint32_t GetRaceId() const;
   bool IsWeaponDrawn() const;
+  espm::ObjectBounds GetBounds() const;
 
   void SetRaceMenuOpen(bool isOpen);
   void SetAppearance(const Appearance* newAppearance);
@@ -52,17 +59,26 @@ public:
 
   void ResolveSnippet(uint32_t snippetIdx, VarValue v);
   void SetPercentages(float healthPercentage, float magickaPercentage,
-                      float staminaPercentage);
+                      float staminaPercentage, MpActor* aggressor = nullptr);
 
   std::chrono::steady_clock::time_point GetLastAttributesPercentagesUpdate();
+  std::chrono::steady_clock::time_point GetLastHitTime();
 
   void SetLastAttributesPercentagesUpdate(
     std::chrono::steady_clock::time_point timePoint =
       std::chrono::steady_clock::now());
+  void SetLastHitTime(std::chrono::steady_clock::time_point timePoint =
+                        std::chrono::steady_clock::now());
 
   std::chrono::duration<float> GetDurationOfAttributesPercentagesUpdate(
-    std::chrono::steady_clock::time_point now =
-      std::chrono::steady_clock::now());
+    std::chrono::steady_clock::time_point now);
+
+  void Kill(MpActor* killer = nullptr);
+  void RespawnAfter(float seconds, const LocationalData& position);
+  void Respawn(const LocationalData& position);
+  void Teleport(const LocationalData& position);
+  void SetSpawnPoint(const LocationalData& position);
+  LocationalData GetSpawnPoint() const;
 
 private:
   std::set<std::shared_ptr<DestroyEventSink>> destroyEventSinks;
@@ -70,7 +86,12 @@ private:
   struct Impl;
   std::shared_ptr<Impl> pImpl;
 
-  std::chrono::steady_clock::time_point lastAttributesUpdateTimePoint;
+  void SendAndSetDeathState(bool isDead);
+  void SendAndSetDeathState(const LocationalData& position, bool isDead,
+                            bool shouldTeleport = true);
+  std::string GetDeathStateMsg(const LocationalData& position, bool isDead,
+                               bool shouldTeleport);
+  void MpApiDeath(MpActor* killer = nullptr);
 
 protected:
   void BeforeDestroy() override;

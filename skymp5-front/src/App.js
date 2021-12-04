@@ -1,17 +1,8 @@
 import React from "react";
 import { connect } from "react-redux";
 
-import {
-  HashRouter as Router,
-  Switch,
-  Route,
-} from "react-router-dom";
-
-import history from "./utils/history";
-
-import Chat from "./features/chat";
+import Chat from "./constructorComponents/chat"
 import AnimList from "./features/animList";
-import LoginPage from "./features/login";
 import Constructor from "./constructor";
 
 class App extends React.Component {
@@ -19,6 +10,7 @@ class App extends React.Component {
     super(props);
     this.state = {
       isLoggined: false,
+      widgets: this.props.elem || null
     }
   }
 
@@ -44,17 +36,25 @@ class App extends React.Component {
       window.skymp.on("message", (action) => {
         window.storage.dispatch(action);
       });
-    } catch {}
+    } catch { }
 
     window.isMoveWindow = false;
     window.addEventListener("mousemove", this.onMoveWindow);
     window.addEventListener("mouseup", this.onMouseUp);
-  }
 
+    window.skyrimPlatform.widgets.addListener(this.handleWidgetUpdate.bind(this))
+  }
+  handleWidgetUpdate(newWidgets) {
+    this.setState({
+      ...this.state,
+      widgets: newWidgets
+    })
+  }
   componentWillUnmount() {
     window.removeEventListener("focus", this.onWindowFocus.bind(this));
     window.removeEventListener("blur", this.onWindowFocus.bind(this));
     window.addEventListener("mousemove", this.onMoveWindow);
+    window.skyrimPlatform.widgets.removeListener(this.handleWidgetUpdate.bind(this))
   }
 
   onWindowFocus(e) {
@@ -64,7 +64,6 @@ class App extends React.Component {
 
   onMoveWindow(e) {
     if (window.isMoveWindow && typeof window.moveWindow == "function") {
-      // console.log(e)
       window.moveWindow(e.clientX, e.clientY);
     }
   }
@@ -73,21 +72,30 @@ class App extends React.Component {
     if (window.isMoveWindow) window.isMoveWindow = false;
     window.moveWindow = null;
   }
-
   render() {
     if (this.state.isLoggined)
       return (
-          <div className={`App ${!window.hasOwnProperty("skymp") ? "bg" : ""}`}>
-            <AnimList />
-            <Chat />
-          </div>
+        <div className={`App ${!window.hasOwnProperty("skyrimPlatform") ? "bg" : ""}`}>
+          <AnimList />
+          <Chat />
+        </div>
       )
     else
-      return (
-        <>
-          <Constructor elem={this.props.elem} height={this.props.height || 704} width={this.props.width || 512}/>
-        </>
-      )
+      if (this.state.widgets)
+        return (
+          <>
+            {this.state.widgets.map((widget, index) =>
+              <Constructor
+                key={index.toString() + widget.type + ((widget.type == "form") ? widget.elements + widget.caption : (widget.type === "chat") ? widget.messages : "")}
+                dynamicSize={true}
+                elem={widget}
+                height={this.props.height || 704}
+                width={this.props.width || 512} />
+            )}
+          </>
+        )
+      else
+        return <></>
   }
 }
 
